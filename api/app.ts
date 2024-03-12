@@ -5,8 +5,10 @@ require("dotenv").config({
 });
 
 // Custom Modules, Packages, Configs, etc.
-import { connectDB } from "./database/mongoDB";
-import Fixture from "./model/Fixture";
+import { connectDB } from "./databases/mongoDB";
+import {redisClient} from './databases/redis';
+import { getFixturesFromCache } from "./services/getFixturesFromCache";
+import { getFixturesFromDatabase } from "./services/getFixturesFromDatabase";
 
 //Application
 const app: Application = express();
@@ -21,29 +23,38 @@ app.get("/healthcheck", (_, res: Response) => {
 });
 
 app.get("/fixtures", async (req: Request, res: Response) => {
-    try {
-        const limit = parseInt(req.query.limit as string) || 15;
-        const page = parseInt(req.query.page as string) || 1;
+  try {
+    const page: number = parseInt(req.query.page as string) || 1;
+    const limit: number = parseInt(req.query.limit as string) || 15
 
-        const startIndex = (page - 1) * limit;
-
-        const fixtures = await Fixture.find().limit(limit).skip(startIndex).exec();
-        const totalPages = Math.ceil(await Fixture.countDocuments() / limit);
-        
-
-        res.status(200).json({
-            error:false,
-            data: fixtures,
-            currentPage: page,
-            totalPages: totalPages
-        });
-    } catch (error) {
-        console.error('Error fetching fixtures:', error);
-        res.status(500).json({ error: 'Internal server error' });
+    const cacheData = await getFixturesFromCache(page, limit);
+    if (cacheData) {
+      return res.status(200).json({
+        isCached: true,
+        error: false,
+        data: cacheData.fixtures,
+        currentPage: page,
+        totalPages: cacheData.totalPages
+      });
+    } else {
+      const dbData = await getFixturesFromDatabase(page, limit);
+      return res.status(200).json({
+        isCached: false,
+        error: false,
+        data: dbData.fixtures,
+        currentPage: page,
+        totalPages: dbData.totalPages
+      });
     }
-})
+  } catch (error) {
+    console.error('Error fetching fixtures:', error);
+    return res.status(500).json({error: true, message: 'Internal server error' });
+  }
+});
 
 
-
+redisClient.on("connect", () => {
+  console.log("Redis connected");
+});
 connectDB();
 export default app;
