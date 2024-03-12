@@ -3,11 +3,14 @@ package cmd
 import (
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/taylankalkan01/onedio-case/cli/database"
 	"github.com/taylankalkan01/onedio-case/cli/model"
 
@@ -32,8 +35,9 @@ func init() {
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			filename := args[0]
+			redisClient := database.ConnectWithRedis()
 
-			err := parseAndSave(filename)
+			err := parseAndSave(filename, redisClient)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -44,7 +48,9 @@ func init() {
 	rootCmd.AddCommand(parseAndSaveCmd)
 }
 
-func parseAndSave(filename string) error {
+func parseAndSave(filename string, redisClient *redis.Client) error {
+	var ctx = context.Background()
+
 	file, err := os.Open(filename)
 	if err != nil {
 		return fmt.Errorf("CSV reading error: %s", err)
@@ -62,14 +68,27 @@ func parseAndSave(filename string) error {
 
 	collection := client.Database("football").Collection("fixtures")
 
-	var fixtures []interface{}
-	for {
+	for i := 1; ; i++ {
 		record, err := reader.Read()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			return fmt.Errorf("CSV reading error: %s", err)
+		}
+
+		key := fmt.Sprintf("fixture_%d", i)
+		val, err := redisClient.Get(ctx, key).Bytes()
+		if err == nil {
+			var fixture model.Fixture
+			err := json.Unmarshal(val, &fixture)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling fixture from JSON: %s", err)
+			}
+			fmt.Println("Data found in cache:", fixture)
+			continue
+		} else if err != redis.Nil {
+			return fmt.Errorf("redis error: %s", err)
 		}
 
 		fixture := model.Fixture{
@@ -81,13 +100,22 @@ func parseAndSave(filename string) error {
 			Referee:  record[10],
 		}
 
-		fixtures = append(fixtures, fixture)
-	}
+		fixtureBytes, err := json.Marshal(fixture)
+		if err != nil {
+			return fmt.Errorf("error marshaling fixture to JSON: %s", err)
+		}
 
-	// Insert into MongoDB
-	_, err = collection.InsertMany(context.Background(), fixtures)
-	if err != nil {
-		return fmt.Errorf("inserting into MongoDB error: %s", err)
+		err = redisClient.Set(ctx, key, fixtureBytes, time.Hour).Err()
+		if err != nil {
+			return fmt.Errorf("redis error: %s", err)
+		}
+		fmt.Println("Data successfully saved to redis.")
+
+		// Insert into MongoDB
+		_, err = collection.InsertOne(context.Background(), fixture)
+		if err != nil {
+			return fmt.Errorf("inserting into MongoDB error: %s", err)
+		}
 	}
 
 	return nil
